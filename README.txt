@@ -1,1 +1,1 @@
-Code to simulate discrete events in MAU and model the impact on changes in resources
+Code to simulate discrete events in Frailty SDEC and model the impact on changes in resources
