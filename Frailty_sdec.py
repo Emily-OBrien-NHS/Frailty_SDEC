@@ -8,11 +8,12 @@ from sqlalchemy import create_engine
 import re
 
 class default_params():
+    random.seed(10)
     run_name = 'Frailty Model'
     #run times and iterations
-    run_time = 525600
+    run_time = 10080#525600
     run_days = int(run_time/(60*24))
-    iterations = 10
+    iterations = 1#0
     occ_sample_time = 60
     #FSDEC Opening Hours (to change closure days and hours, edit close FSDEC
     #function)
@@ -27,7 +28,7 @@ class default_params():
                                '+for+SQL+Server')
     FSDEC_arrivals_SQL = """SET NOCOUNT ON
     declare @startdatetime as datetime
-    set @startdatetime = '21-jun-2023 00:00:00'
+    set @startdatetime = '01-oct-2024 00:00:00'
 
     ----ED attendances
     select LengthOfStay,
@@ -107,6 +108,7 @@ class default_params():
                                      on=['DoW', 'HoD'], how='left')
                                      .interpolate(limit_direction='both')
                                      .astype(int))
+
     #Get GP/other to FSDEC Arrivals
     GP_to_FSDEC_arrivals = FSDEC_arrivals.loc[FSDEC_arrivals['EDDischargeDateTime'].isna()].copy()
     GP_to_FSDEC_arrivals['InterArr'] = (GP_to_FSDEC_arrivals['ArrivalDtm'].diff()
@@ -117,6 +119,7 @@ class default_params():
                                      on=['DoW', 'HoD'], how='left')
                                      .interpolate(limit_direction='both')
                                      .astype(int))
+
     #ED to SSU arrivals
     mean_ED_to_SSU = 420 #Need this number
     #LoS
@@ -126,8 +129,8 @@ class default_params():
     mean_SSU_los = 36*60
     max_SSU_los = 72*60
     #resources
-    no_FSDEC_beds = 10
-    no_SSU_beds = 14
+    no_FSDEC_beds = 5#10
+    no_SSU_beds = 20
     #Probability splits
     FSDEC_to_SSU = 0.08
     FSDEC_close_to_SSU = 0.5
@@ -256,38 +259,68 @@ class frailty_model:
 
     ######################### CLOSE FSDEC ################################
     def close_FSDEC(self):
+        self.FSDEC_is_open = False
+        self.FSDEC_accepting = False
         while True:
             #Work out what time it is and if FSDEC is closed or not.
             time = self.env.now
             day, day_of_week, hour = self.model_time(time)
+
+            time_open = self.input_params.FSDEC_close_time - self.input_params.FSDEC_open_time
+            time_accepting = self.input_params.FSDEC_stop_accept - self.input_params.FSDEC_open_time
             #First day,wait until 8pm then close
             if time == 0:
                 time_closed = self.input_params.FSDEC_open_time
-                time_out = self.input_params.FSDEC_close_time
+                time_out = self.input_params.FSDEC_close_time - self.input_params.FSDEC_open_time
             else:
                 #If week day, close for 12 hour overnight and time out process
                 # until next day
                 if day_of_week < 4:
-                    time_closed = 12
-                    time_out = 24
+                    time_closed = 24 - self.input_params.FSDEC_close_time + self.input_params.FSDEC_open_time
+                    time_out = self.input_params.FSDEC_close_time - self.input_params.FSDEC_open_time
                 #If friday, close for weekend and time out until next close on
                 # monday evening.
                 else:
                     time_closed = 60
                     time_out = 72
-            #Take away all the beds for the close time to siulate the unit being
+
+            #Take away all the beds for the close time to simulate the unit being
             #closed.
-            for _ in range(self.input_params.no_FSDEC_beds):
-                self.env.process(self.fill_FSDEC(time_closed * 60))
-               # yield self.env.timeout(0)
+            print(f'--!!!!!CLOSING FSDEC AT FOR {time} {time_closed}h until {time + time_closed*60}!!!!!--')
+
+            yield self.env.process(self.claim_all_resources(time_closed * 60))
+
+            self.FSDEC_is_open = True
+            self.FSDEC_accepting = True
+
+            print(f'--!!!!!FSDEC REOPENING AT {self.env.now}, NEXT CLOSE {self.env.now + time_out*60}!!!!!--')
+            print(f'--Time: {self.env.now}, Queue length: {len(self.FSDEC_bed.queue)}, shop occupancy: {self.FSDEC_bed.count}')
             #Timout for timeout period until next closure. 
-            yield self.env.timeout(time_out * 60)
-    
-    def fill_FSDEC(self, time_closed):
-        #If close time, take away all the FSDEC beds
-        with self.FSDEC_bed.request(priority=-1) as req:
-            yield req
-            yield self.env.timeout(time_closed)
+            #yield self.env.timeout(time_open * 60)
+
+            #Time out until stop accept
+            yield self.env.timeout(time_accepting * 60)
+            print(f'--!!!!!FSDEC STOP ACCEPTING AT {self.env.now}!!!!!--')
+            self.FSDEC_accepting = False
+            yield self.env.timeout((time_open - time_accepting) * 60)
+            self.FSDEC_is_open = False
+
+    def claim_all_resources(self, time_closed):
+        """Claim all resources atomically"""
+        requests = [] # Make all requests first 
+        for i in range(self.input_params.no_FSDEC_beds):
+            req = self.FSDEC_bed.request(priority=-1)
+            requests.append(req)
+            print(f'--claiming resource {i+1} at {self.env.now}') # Wait for all requests to be granted
+        yield self.env.all_of(requests)
+        print(f'--all resources claimed at {self.env.now}') 
+        print(f'--!!!!!FSDEC CLOSED!!!!!--')
+        yield self.env.timeout(time_closed) 
+        
+        # Explicitly release all resources
+        for i, req in enumerate(requests):
+            self.FSDEC_bed.release(req)
+            print(f'--releasing resource {i+1} at {self.env.now}')
 
     ######################## FRAILTY JOURNEY #############################
 
@@ -296,9 +329,86 @@ class frailty_model:
         if (patient.arrival == 'GP arrival') or (patient.arrival == 'ED to FSDEC arrival'):
             patient.journey_string += 'FSDEC > '
             patient.FSDEC_wait_start_time = self.env.now
+            day, day_of_week, hour = self.model_time(patient.FSDEC_wait_start_time)
+            FSDEC_accepting_time, FSDEC_open_time = self.FSDEC_open(day, day_of_week, hour)
+
+            print(f'patient {patient.id} starting FSDEC process at {patient.FSDEC_wait_start_time}. FSDEC accept bool: {self.FSDEC_accepting}, FSDEC open bool: {self.FSDEC_is_open}')
+
+            #If arrival hour between stop accept and close, add an extra wait
+            #to ensure they don't sneak in between these times
+            if ((hour >= self.input_params.FSDEC_stop_accept) 
+                and (hour < self.input_params.FSDEC_close_time)):
+                #Time out until FSDEC close to ensure patient doesn't get bed
+                # when FSDEC not accepting
+                next_close = ((day * 60 * 24)
+                                 + (self.input_params.FSDEC_close_time * 60))
+                time_out = (next_close - patient.FSDEC_wait_start_time) + 2
+                print(f'patient {patient.id} arrived in queue after stop accepting.  Time out {time_out} until close')
+                yield self.env.timeout(time_out)
+                print(f'patient {patient.id} has waited until close {self.env.now}')
+
+
             #request FSDEC bed
-            with self.FSDEC_bed.request() as req:
-                yield req
+            i=1
+            with self.FSDEC_bed.request(priority=1) as req:
+                time = self.env.now
+                print(f'patient {patient.id} requesting FSDEC bed at time {time} - attempt {i}, FSDEC accepting = {self.FSDEC_accepting}')
+
+#                while not self.FSDEC_accepting:
+ #                   yield self.env.timeout(1)
+
+                #Find out current model time
+                time = self.env.now
+                day, day_of_week, hour = self.model_time(time)
+                #Work out the minutes until the next FSDEC stop accept time
+                next_stop_accept_day = (day + 1 if hour
+                                        >= self.input_params.FSDEC_stop_accept
+                                        else day)
+                next_stop_accept = ((next_stop_accept_day * 60 * 24)
+                                + (self.input_params.FSDEC_stop_accept * 60))
+                time_to_stop_accept = (next_stop_accept - time) + 1
+
+                print(f'patient {patient.id} has {time_to_stop_accept} until FSDEC stops accepting')
+
+                #Patient either gets bed or timesout if past stop accept time
+                yield req | self.env.timeout(time_to_stop_accept)
+
+                #If patient doesn't get a bed the first attempt, keep trying
+                #until they do
+                while not req.triggered:
+                    i += 1
+
+                    print(f'patient {patient.id} FSDEC has stopped accepting at {self.env.now}, patient waiting for re-open for attempt {i}, FSDEC accepting = {self.FSDEC_accepting}')
+                    #Time out for the time between stop accepting and close, to
+                    #ensure not patients get a bed during this time.
+                    yield self.env.timeout(((self.input_params.FSDEC_close_time
+                                        - self.input_params.FSDEC_stop_accept)
+                                        * 60) + 1)
+
+#                    while not self.FSDEC_accepting:
+#                        yield self.env.timeout(1)
+
+
+                    print(f'patient {patient.id} requesting FSDEC bed at time {self.env.now} - attempt {i}')
+                    #Patient tries again to get a bed until the next stop accept
+                    #time.
+                    time = self.env.now
+                    day, day_of_week, hour = self.model_time(time)
+                    next_stop_accept_day = (day + 1 if hour 
+                                        >= self.input_params.FSDEC_stop_accept
+                                        else day)
+                    next_stop_accept = ((next_stop_accept_day * 60 * 24)
+                                        + (self.input_params.FSDEC_stop_accept
+                                        * 60))
+                    time_to_stop_accept = (next_stop_accept - time) + 1
+
+                    print(f'patient {patient.id} has {time_to_stop_accept} until FSDEC stops accepting')
+
+                    #Patient either gets bed or timesout if past stop accept time
+                    yield req | self.env.timeout(time_to_stop_accept)
+                    
+
+                print(f'patient {patient.id} got FSDEC bed at {self.env.now} on attempt {i}')
                 patient.FSDEC_admitted_time = self.env.now
                 day, day_of_week, hour = self.model_time(patient.FSDEC_admitted_time)
                 #Get sampled FSDEC time, resample if over maximum
@@ -372,12 +482,13 @@ class frailty_model:
             self.mru_occupancy_results.append([self.run_number,
                                                self.FSDEC_bed._env.now,
                                                (self.FSDEC_bed.count
-                                                     if FSDEC_open else np.nan),
+                                                    if FSDEC_open else np.nan),
                                                len(self.FSDEC_bed.queue),
                                                self.SSU_bed._env.now,
                                                self.SSU_bed.count,
                                                len(self.SSU_bed.queue)])
             yield self.env.timeout(self.input_params.occ_sample_time)
+
 ########################RUN#######################
     def run(self):
         self.env.process(self.ED_to_SSU_arrivals())
@@ -459,6 +570,8 @@ def export_results(run_days, pat_results, occ_results):
     occupancy_df['day'] = pd.cut(occupancy_df['FSDEC Time'], bins=run_days,
                                  labels=np.linspace(1, run_days, run_days))
     occupancy_df['hour'] = (occupancy_df['FSDEC Time'] / 60) % 24
+    #Remove occupancy when closed, and fill in queue between 6-8pm
+    
 
     return patient_df, occupancy_df
 
@@ -483,6 +596,12 @@ occ.to_csv(f'C:/Users/obriene/Projects/Discrete Event Simulation/Frailty SDEC/Re
 DoW_7 = np.array([1, 2, 3, 4, 5, 6, 7]).astype(str)
 DoW_df = pd.DataFrame({'DoW':[1, 2, 3, 4, 5, 6, 7]})
 
+# 25th and 75th Percentiles functions 
+def q25(x):
+    return x.quantile(0.25)
+def q75(x):
+    return x.quantile(0.75)
+
 #####LoS Plot
 fig, (ax1, ax2) = plt.subplots(2)
 fig.suptitle('Length of Stay')
@@ -500,14 +619,38 @@ plt.savefig(f'C:/Users/obriene/Projects/Discrete Event Simulation/Frailty SDEC/R
             bbox_inches='tight', dpi=1200)
 plt.close()
 
+#####Overall Occupancy plot
+#Metrics by day of week
+occ_metrics = (occ.groupby('day', observed=False, as_index=False)
+               [['FSDEC Occupancy', 'SSU Occupancy']]
+               .agg({'FSDEC Occupancy':['min', q25, 'mean', q75, 'max'],
+                     'SSU Occupancy':['min', q25, 'mean', q75, 'max']}))
+#plot
+fig, (ax1, ax2) = plt.subplots(2, figsize=(20, 10))
+fig.suptitle('Occupancy by Day', fontsize=24)
+FSDEC_metrics = occ_metrics['FSDEC Occupancy']
+ax1.plot(occ_metrics['day'], FSDEC_metrics['mean'].fillna(0), '-r', label='Mean')
+ax1.fill_between(occ_metrics['day'], FSDEC_metrics['min'].fillna(0), FSDEC_metrics['max'].fillna(0), color='grey', alpha=0.2, label='Min-Max')
+ax1.fill_between(occ_metrics['day'], FSDEC_metrics['q25'].fillna(0), FSDEC_metrics['q75'].fillna(0), color='black', alpha=0.2, label='LQ-UQ')
+ax1.set_title('FSDEC', fontsize=18)
+ax1.set_ylabel('No. Beds Occupied', fontsize=18)
+ax1.tick_params(axis='both',  which='major', labelsize=18)
+ax1.legend(fontsize=18)
+SSU_metrics = occ_metrics['SSU Occupancy']
+ax2.plot(occ_metrics['day'], SSU_metrics['mean'], '-r')
+ax2.fill_between(occ_metrics['day'], SSU_metrics['min'], SSU_metrics['max'], color='grey', alpha=0.2)
+ax2.fill_between(occ_metrics['day'], SSU_metrics['q25'], SSU_metrics['q75'], color='black', alpha=0.2)
+ax2.set_title('SSU', fontsize=18)
+ax2.set_xlabel('Day of Model', fontsize=18)
+ax2.tick_params(axis='both',  which='major', labelsize=18)
+fig.tight_layout()
+plt.savefig(f'C:/Users/obriene/Projects/Discrete Event Simulation/Frailty SDEC/Results/{default_params.run_name} - Occupancy.png',
+            bbox_inches='tight', dpi=1200)
+plt.close()
+
 #####Occupancy Hour of Day plot
-# 25th and 75th Percentiles
-def q25(x):
-    return x.quantile(0.25)
-def q75(x):
-    return x.quantile(0.75)
 #Metrics by hour of day
-occ_metrics = (occ.groupby('hour', as_index=False)
+occ_metrics = (occ.groupby('hour', observed=False,  as_index=False)
                [['FSDEC Occupancy', 'SSU Occupancy']]
                .agg({'FSDEC Occupancy':['min', q25, 'mean', q75, 'max'],
                      'SSU Occupancy':['min', q25, 'mean', q75, 'max']}))
@@ -535,10 +678,10 @@ plt.savefig(f'C:/Users/obriene/Projects/Discrete Event Simulation/Frailty SDEC/R
             bbox_inches='tight', dpi=1200)
 plt.close()
 
-#####Overall Occupancy plot?
+######Occupancy by DoW
 occ['DoW'] = ((occ['day'].astype(int)-1) % 7) + 1
 #Metrics by day of week
-occ_metrics = (occ.groupby('DoW', as_index=False)
+occ_metrics = (occ.groupby('DoW', observed=False,  as_index=False)
                [['FSDEC Occupancy', 'SSU Occupancy']]
                .agg({'FSDEC Occupancy':['min', q25, 'mean', q75, 'max'],
                      'SSU Occupancy':['min', q25, 'mean', q75, 'max']}))
@@ -694,7 +837,7 @@ fig.suptitle('Average Bed Wait Time', fontsize=24)
 FSDEC_metrics = wait_time['Wait for FSDEC Bed Time']
 ax1.plot(FSDEC_metrics.index.tolist(), FSDEC_metrics['mean'].fillna(0), '-r', label='Mean')
 ax1.fill_between(FSDEC_metrics.index.tolist(), FSDEC_metrics['min'].fillna(0), FSDEC_metrics['max'].fillna(0), color='grey', alpha=0.2, label='Min-Max')
-ax1.fill_between(FSDEC_metrics.index.tolist(), FSDEC_metrics['q25'].fillna(0), FSDEC_metrics['q75'].fillna(0), color='black', alpha=0.2, label='10th-90th Percentile')
+ax1.fill_between(FSDEC_metrics.index.tolist(), FSDEC_metrics['q25'].fillna(0), FSDEC_metrics['q75'].fillna(0), color='black', alpha=0.2, label='LQ-UQ')
 ax1.set_title('FSDEC', fontsize=18)
 ax1.set_ylabel('Mean Minutes Waited', fontsize=18)
 ax1.tick_params(axis='both',  which='major', labelsize=18)
@@ -724,7 +867,7 @@ fig.suptitle('Average Bed Wait Time', fontsize=24)
 FSDEC_metrics = wait_time['Wait for FSDEC Bed Time'].fillna(0)
 ax1.plot(FSDEC_metrics.index.tolist(), FSDEC_metrics['mean'].fillna(0), '-r', label='Mean')
 ax1.fill_between(FSDEC_metrics.index.tolist(), FSDEC_metrics['min'].fillna(0), FSDEC_metrics['max'].fillna(0), color='grey', alpha=0.2, label='Min-Max')
-ax1.fill_between(FSDEC_metrics.index.tolist(), FSDEC_metrics['q25'].fillna(0), FSDEC_metrics['q75'].fillna(0), color='black', alpha=0.2, label='10th-90th Percentile')
+ax1.fill_between(FSDEC_metrics.index.tolist(), FSDEC_metrics['q25'].fillna(0), FSDEC_metrics['q75'].fillna(0), color='black', alpha=0.2, label='LQ-UQ')
 ax1.set_title('FSDEC', fontsize=18)
 ax1.set_ylabel('Mean Minutes Waited', fontsize=18)
 ax1.tick_params(axis='both',  which='major', labelsize=18)
@@ -734,7 +877,7 @@ ax2.plot(FSDEC_metrics.index.tolist(), SSU_metrics['mean'], '-r')
 ax2.fill_between(FSDEC_metrics.index.tolist(), SSU_metrics['min'], SSU_metrics['max'], color='grey', alpha=0.2)
 ax2.fill_between(FSDEC_metrics.index.tolist(), SSU_metrics['q25'], SSU_metrics['q75'], color='black', alpha=0.2)
 ax2.set_title('SSU', fontsize=18)
-ax2.set_xlabel('Simulation Arrival Day', fontsize=18)
+ax2.set_xlabel('Day of Week', fontsize=18)
 ax2.set_ylabel('Mean Minutes Waited', fontsize=18)
 ax2.tick_params(axis='both',  which='major', labelsize=18)
 fig.tight_layout()
