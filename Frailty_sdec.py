@@ -12,7 +12,7 @@ class default_params():
     #run times and iterations
     run_time = 525600#10080
     run_days = int(run_time/(60*24))
-    iterations = 1#0
+    iterations = 10
     occ_sample_time = 60
     #FSDEC Opening Hours (to change closure days and hours, edit close FSDEC
     #function)
