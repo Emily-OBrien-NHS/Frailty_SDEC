@@ -3,15 +3,14 @@ import random
 import math
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 from sqlalchemy import create_engine
+import matplotlib.pyplot as plt
 import re
 
 class default_params():
-    random.seed(10)
     run_name = 'Frailty Model'
     #run times and iterations
-    run_time = 10080#525600
+    run_time = 525600#10080
     run_days = int(run_time/(60*24))
     iterations = 1#0
     occ_sample_time = 60
@@ -119,17 +118,16 @@ class default_params():
                                      on=['DoW', 'HoD'], how='left')
                                      .interpolate(limit_direction='both')
                                      .astype(int))
-
     #ED to SSU arrivals
     mean_ED_to_SSU = 420 #Need this number
-    #LoS
+    #Length of Stay
     mean_FSDEC_los = 10*60
     max_FSDEC_los = 12*60 #only open 12 hours, longer than this is not possible.
     min_FSDEC_los = 60
     mean_SSU_los = 36*60
     max_SSU_los = 72*60
     #resources
-    no_FSDEC_beds = 5#10
+    no_FSDEC_beds = 10
     no_SSU_beds = 20
     #Probability splits
     FSDEC_to_SSU = 0.08
@@ -141,6 +139,7 @@ class default_params():
 class spawn_patient:
     def __init__(self, p_id, FSDEC_to_SSU_prob, 
                  FSDEC_close_to_SSU_prob):
+        #patient id
         self.id = p_id
         #Record arrival mode
         self.arrival = ''
@@ -165,6 +164,9 @@ class spawn_patient:
 
 class frailty_model:
     def __init__(self, run_number, input_params):
+        #List to manually monitor FSDEC queue
+        self.FSDEC_queue = []
+        #Set up lists to record results
         self.patient_results = []
         self.mru_occupancy_results = []
         #start environment, set patient counter to 0 and set run number
@@ -173,10 +175,15 @@ class frailty_model:
         self.patient_counter = 0
         self.run_number = run_number
         #establish resources
-        self.FSDEC_bed = simpy.PriorityResource(self.env,
+        self.FSDEC_bed = simpy.Resource(self.env,
                                         capacity=input_params.no_FSDEC_beds)
         self.SSU_bed = simpy.PriorityResource(self.env,
                                       capacity=input_params.no_SSU_beds)
+        #Start FSDEC accepting condition event
+        self.FSDEC_is_open = False
+        self.FSDEC_accepting = False
+        self.FSDEC_accepting_event = self.env.event()
+
     ######################MODEL TIME AND FSDEC OPEN#############################
     def model_time(self, time):
         #Work out what time it is and if FSDEC is closed or not.
@@ -188,6 +195,7 @@ class frailty_model:
         return day, day_of_week, hour
     
     def FSDEC_open(self, day, day_of_week, hour):
+        #Function to work out if FSDEC is open and/or accepting at any time
         FSDEC_accepting = ((day_of_week in self.input_params.FSDEC_day_of_week)
                            and ((hour >= self.input_params.FSDEC_open_time)
                               and (hour < self.input_params.FSDEC_stop_accept)))
@@ -195,6 +203,7 @@ class frailty_model:
                            and ((hour >= self.input_params.FSDEC_open_time)
                                and (hour < self.input_params.FSDEC_close_time)))
         return FSDEC_accepting, FSDEC_open
+    
     ###########################ARRIVALS##################################
     def ED_to_SSU_arrivals(self):
         yield self.env.timeout(1)
@@ -258,69 +267,66 @@ class frailty_model:
             yield self.env.timeout(sampled_interarrival)
 
     ######################### CLOSE FSDEC ################################
+    def create_FSDEC_accepting_event(self):
+        #Event to monitor if FSDEC is open or closed
+        if self.FSDEC_accepting:
+            if not self.FSDEC_accepting_event.triggered:
+                self.FSDEC_accepting_event.succeed()
+        else:
+        # If it's already triggered, and we are now closing FSDEC, replace with a new untriggered event
+            if self.FSDEC_accepting_event.triggered:
+                self.FSDEC_accepting_event = self.env.event()
+
     def close_FSDEC(self):
-        self.FSDEC_is_open = False
-        self.FSDEC_accepting = False
+        #Manage FSDEC opening and closing schedule
         while True:
-            #Work out what time it is and if FSDEC is closed or not.
-            time = self.env.now
-            day, day_of_week, hour = self.model_time(time)
+            current_time = self.env.now
+            day, day_of_week, hour = self.model_time(current_time)
+            
+            # Check current status
+            should_be_accepting, should_be_open = self.FSDEC_open(day, day_of_week, hour)
+            
+            if should_be_accepting and not self.FSDEC_accepting:
+                # Time to open FSDEC and start accepting patients
+                print(f'!!!!!FSDEC START ACCEPTING AT {current_time}!!!!!')
+                self.FSDEC_accepting = True
+                self.FSDEC_is_open = True
+                self.create_FSDEC_accepting_event()
+                
+            elif not should_be_accepting and self.FSDEC_accepting:
+                # Time to stop accepting new patients (6pm)
+                print(f'!!!!!FSDEC STOP ACCEPTING AT {current_time}!!!!!')
+                self.FSDEC_accepting = False
+                self.create_FSDEC_accepting_event()  # Create new event but don't trigger
+                
+            elif not should_be_open and self.FSDEC_is_open:
+                # Time to close completely (8pm) - claim all beds
+                print(f'!!!!!FSDEC CLOSING AT {current_time}!!!!!')
+                self.FSDEC_is_open = False
+                self.FSDEC_accepting = False
+                
+                # Calculate how long to stay closed
+                if day_of_week < 4:  # Monday-Thursday, reopen next morning
+                    close_duration = (24 - self.input_params.FSDEC_close_time + 
+                                    self.input_params.FSDEC_open_time) * 60
+                else:  # Friday, closed for weekend
+                    close_duration = (72 - self.input_params.FSDEC_close_time + 
+                                    self.input_params.FSDEC_open_time) * 60
+                
+                #time out until next open
+                print(f'!!!!!FSDEC CLOSED!!!!!')
+                yield self.env.timeout(close_duration) 
 
-            time_open = self.input_params.FSDEC_close_time - self.input_params.FSDEC_open_time
-            time_accepting = self.input_params.FSDEC_stop_accept - self.input_params.FSDEC_open_time
-            #First day,wait until 8pm then close
-            if time == 0:
-                time_closed = self.input_params.FSDEC_open_time
-                time_out = self.input_params.FSDEC_close_time - self.input_params.FSDEC_open_time
-            else:
-                #If week day, close for 12 hour overnight and time out process
-                # until next day
-                if day_of_week < 4:
-                    time_closed = 24 - self.input_params.FSDEC_close_time + self.input_params.FSDEC_open_time
-                    time_out = self.input_params.FSDEC_close_time - self.input_params.FSDEC_open_time
-                #If friday, close for weekend and time out until next close on
-                # monday evening.
-                else:
-                    time_closed = 60
-                    time_out = 72
+                #FSDEC Re-opening
+                print(f'!!!!!FSDEC REOPENING AT {self.env.now}!!!!!')
+                print(f'!!Time: {self.env.now}, Queue length: {len(self.FSDEC_bed.queue)}, shop occupancy: {self.FSDEC_bed.count}')
+                self.FSDEC_is_open = True
+                self.FSDEC_accepting = True
+                self.create_FSDEC_accepting_event()
+            
+            # Check again in 60 minutes
+            yield self.env.timeout(60)
 
-            #Take away all the beds for the close time to simulate the unit being
-            #closed.
-            print(f'--!!!!!CLOSING FSDEC AT FOR {time} {time_closed}h until {time + time_closed*60}!!!!!--')
-
-            yield self.env.process(self.claim_all_resources(time_closed * 60))
-
-            self.FSDEC_is_open = True
-            self.FSDEC_accepting = True
-
-            print(f'--!!!!!FSDEC REOPENING AT {self.env.now}, NEXT CLOSE {self.env.now + time_out*60}!!!!!--')
-            print(f'--Time: {self.env.now}, Queue length: {len(self.FSDEC_bed.queue)}, shop occupancy: {self.FSDEC_bed.count}')
-            #Timout for timeout period until next closure. 
-            #yield self.env.timeout(time_open * 60)
-
-            #Time out until stop accept
-            yield self.env.timeout(time_accepting * 60)
-            print(f'--!!!!!FSDEC STOP ACCEPTING AT {self.env.now}!!!!!--')
-            self.FSDEC_accepting = False
-            yield self.env.timeout((time_open - time_accepting) * 60)
-            self.FSDEC_is_open = False
-
-    def claim_all_resources(self, time_closed):
-        """Claim all resources atomically"""
-        requests = [] # Make all requests first 
-        for i in range(self.input_params.no_FSDEC_beds):
-            req = self.FSDEC_bed.request(priority=-1)
-            requests.append(req)
-            print(f'--claiming resource {i+1} at {self.env.now}') # Wait for all requests to be granted
-        yield self.env.all_of(requests)
-        print(f'--all resources claimed at {self.env.now}') 
-        print(f'--!!!!!FSDEC CLOSED!!!!!--')
-        yield self.env.timeout(time_closed) 
-        
-        # Explicitly release all resources
-        for i, req in enumerate(requests):
-            self.FSDEC_bed.release(req)
-            print(f'--releasing resource {i+1} at {self.env.now}')
 
     ######################## FRAILTY JOURNEY #############################
 
@@ -328,111 +334,81 @@ class frailty_model:
         #Enter FSDEC if patient is GP arrival or ED to FSDEC
         if (patient.arrival == 'GP arrival') or (patient.arrival == 'ED to FSDEC arrival'):
             patient.journey_string += 'FSDEC > '
-            patient.FSDEC_wait_start_time = self.env.now
+            time = self.env.now
+            patient.FSDEC_wait_start_time = time
             day, day_of_week, hour = self.model_time(patient.FSDEC_wait_start_time)
-            FSDEC_accepting_time, FSDEC_open_time = self.FSDEC_open(day, day_of_week, hour)
 
-            print(f'patient {patient.id} starting FSDEC process at {patient.FSDEC_wait_start_time}. FSDEC accept bool: {self.FSDEC_accepting}, FSDEC open bool: {self.FSDEC_is_open}')
+            #Add patient to manual queue
+            self.FSDEC_queue.append(patient)
 
-            #If arrival hour between stop accept and close, add an extra wait
-            #to ensure they don't sneak in between these times
-            if ((hour >= self.input_params.FSDEC_stop_accept) 
-                and (hour < self.input_params.FSDEC_close_time)):
-                #Time out until FSDEC close to ensure patient doesn't get bed
-                # when FSDEC not accepting
-                next_close = ((day * 60 * 24)
-                                 + (self.input_params.FSDEC_close_time * 60))
-                time_out = (next_close - patient.FSDEC_wait_start_time) + 2
-                print(f'patient {patient.id} arrived in queue after stop accepting.  Time out {time_out} until close')
-                yield self.env.timeout(time_out)
-                print(f'patient {patient.id} has waited until close {self.env.now}')
+            # Keep trying to get a bed until successful
+            bed_secured = False
+            req = None
 
+            while not bed_secured:
+                if not self.FSDEC_accepting:
+                    print(f'**patient {patient.id} waiting for FSDEC to start accepting at {self.env.now}')
+                    yield self.FSDEC_accepting_event
 
-            #request FSDEC bed
-            i=1
-            with self.FSDEC_bed.request(priority=1) as req:
-                time = self.env.now
-                print(f'patient {patient.id} requesting FSDEC bed at time {time} - attempt {i}, FSDEC accepting = {self.FSDEC_accepting}')
-
-#                while not self.FSDEC_accepting:
- #                   yield self.env.timeout(1)
-
-                #Find out current model time
+                # FSDEC is now accepting, make a bed request
+                req = self.FSDEC_bed.request()
                 time = self.env.now
                 day, day_of_week, hour = self.model_time(time)
-                #Work out the minutes until the next FSDEC stop accept time
-                next_stop_accept_day = (day + 1 if hour
+
+                next_stop_accept_day = (day + 1 if hour 
                                         >= self.input_params.FSDEC_stop_accept
                                         else day)
                 next_stop_accept = ((next_stop_accept_day * 60 * 24)
-                                + (self.input_params.FSDEC_stop_accept * 60))
-                time_to_stop_accept = (next_stop_accept - time) + 1
-
-                print(f'patient {patient.id} has {time_to_stop_accept} until FSDEC stops accepting')
-
-                #Patient either gets bed or timesout if past stop accept time
-                yield req | self.env.timeout(time_to_stop_accept)
-
-                #If patient doesn't get a bed the first attempt, keep trying
-                #until they do
-                while not req.triggered:
-                    i += 1
-
-                    print(f'patient {patient.id} FSDEC has stopped accepting at {self.env.now}, patient waiting for re-open for attempt {i}, FSDEC accepting = {self.FSDEC_accepting}')
-                    #Time out for the time between stop accepting and close, to
-                    #ensure not patients get a bed during this time.
-                    yield self.env.timeout(((self.input_params.FSDEC_close_time
-                                        - self.input_params.FSDEC_stop_accept)
-                                        * 60) + 1)
-
-#                    while not self.FSDEC_accepting:
-#                        yield self.env.timeout(1)
-
-
-                    print(f'patient {patient.id} requesting FSDEC bed at time {self.env.now} - attempt {i}')
-                    #Patient tries again to get a bed until the next stop accept
-                    #time.
-                    time = self.env.now
-                    day, day_of_week, hour = self.model_time(time)
-                    next_stop_accept_day = (day + 1 if hour 
-                                        >= self.input_params.FSDEC_stop_accept
-                                        else day)
-                    next_stop_accept = ((next_stop_accept_day * 60 * 24)
                                         + (self.input_params.FSDEC_stop_accept
                                         * 60))
-                    time_to_stop_accept = (next_stop_accept - time) + 1
+                time_to_stop_accept = max((next_stop_accept - time), 1)
 
-                    print(f'patient {patient.id} has {time_to_stop_accept} until FSDEC stops accepting')
+                print(f'??patient {patient.id} has requested bed at {time}, {time_to_stop_accept} until FSDEC stops accepting at {time + time_to_stop_accept}')
 
-                    #Patient either gets bed or timesout if past stop accept time
-                    yield req | self.env.timeout(time_to_stop_accept)
-                    
+                #Patient either gets bed or timesout if past stop accept time
+                bed_or_timeout = yield req | self.env.timeout(time_to_stop_accept)
 
-                print(f'patient {patient.id} got FSDEC bed at {self.env.now} on attempt {i}')
-                patient.FSDEC_admitted_time = self.env.now
-                day, day_of_week, hour = self.model_time(patient.FSDEC_admitted_time)
-                #Get sampled FSDEC time, resample if over maximum
+                if req in bed_or_timeout:
+                    bed_secured = True
+                    print(f'++patient {patient.id} got FSDEC bed at {self.env.now}, req status: {req.triggered}')
+                else:
+                    # Timed out, cancel request and wait for next opening
+                    print(f'**patient {patient.id} timed out waiting for bed at {self.env.now}, trying again')
+                    if not req.triggered:
+                        req.cancel()
+
+            #remove from manual queue
+            self.FSDEC_queue.remove(patient)
+            #Record time
+            patient.FSDEC_admitted_time = self.env.now
+            day, day_of_week, hour = self.model_time(patient.FSDEC_admitted_time)
+            #Get sampled FSDEC time, resample if over maximum
+            sampled_FSDEC_time = round(random.expovariate(1.0
+                                        / self.input_params.mean_FSDEC_los))
+            while ((sampled_FSDEC_time < self.input_params.min_FSDEC_los)
+                or (sampled_FSDEC_time > self.input_params.max_FSDEC_los)):
                 sampled_FSDEC_time = round(random.expovariate(1.0
-                                           / self.input_params.mean_FSDEC_los))
-                while ((sampled_FSDEC_time < self.input_params.min_FSDEC_los)
-                    or (sampled_FSDEC_time > self.input_params.max_FSDEC_los)):
-                    sampled_FSDEC_time = round(random.expovariate(1.0
-                                           / self.input_params.mean_FSDEC_los))
-                patient.FSDEC_sampled_time = sampled_FSDEC_time
-                #Check if FSDEC will still be open when the patient leaves,
-                #Else kick out to SSU or leave model.
-                pat_leave = patient.FSDEC_admitted_time + sampled_FSDEC_time
-                leave_day, leave_day_of_week, leave_hour = self.model_time(pat_leave)
-                if not self.FSDEC_open(leave_day, leave_day_of_week, leave_hour)[1]:
-                    patient.journey_string += 'KICKOUT > '
-                    next_close = ((day * 60 * 24)
-                                 + (self.input_params.FSDEC_close_time * 60))
-                    sampled_FSDEC_time = max(next_close - patient.FSDEC_admitted_time - 1, 0)
-                    #If patient is kicked out, their chance of going to
-                    # SSU increases, with higher priortiy.
-                    patient.FSDEC_to_SSU = patient.FSDEC_close_to_SSU
-                    patient.SSU_priority = -1
-                yield self.env.timeout(sampled_FSDEC_time)
+                                        / self.input_params.mean_FSDEC_los))
+            patient.FSDEC_sampled_time = sampled_FSDEC_time
+            #Check if FSDEC will still be open when the patient leaves,
+            #Else kick out to SSU or leave model.
+            pat_leave = patient.FSDEC_admitted_time + sampled_FSDEC_time
+            leave_day, leave_day_of_week, leave_hour = self.model_time(pat_leave)
+            if not self.FSDEC_open(leave_day, leave_day_of_week, leave_hour)[1]:
+                patient.journey_string += 'KICKOUT > '
+                next_close = ((day * 60 * 24)
+                                + (self.input_params.FSDEC_close_time * 60))
+                sampled_FSDEC_time = max(next_close - patient.FSDEC_admitted_time - 1, 0)
+                #If patient is kicked out, their chance of going to
+                # SSU increases, with higher priortiy.
+                patient.FSDEC_to_SSU = patient.FSDEC_close_to_SSU
+                patient.SSU_priority = -1
+            yield self.env.timeout(sampled_FSDEC_time)
+
+            # Release the bed
+            self.FSDEC_bed.release(req)
+            print(f'--patient {patient.id} leaving FSDEC bed at {self.env.now}')
+
             patient.FSDEC_leave_time = self.env.now
             #If patient does not continue on to SSU, then this is their final step
             if not patient.FSDEC_to_SSU:
@@ -476,17 +452,22 @@ class frailty_model:
                                      patient.SSU_leave_time])
     
     def store_occupancy(self):
+        yield self.env.timeout(1)
         while True:
             day, day_of_week, hour = self.model_time(self.env.now)
             FSDEC_open = self.FSDEC_open(day, day_of_week, hour)[1]
             self.mru_occupancy_results.append([self.run_number,
-                                               self.FSDEC_bed._env.now,
+                                               self.FSDEC_bed._env.now - 1,
                                                (self.FSDEC_bed.count
                                                     if FSDEC_open else np.nan),
-                                               len(self.FSDEC_bed.queue),
-                                               self.SSU_bed._env.now,
+                                               #len(self.FSDEC_bed.queue),
+                                               len(self.FSDEC_queue),
+                                               self.SSU_bed._env.now - 1,
                                                self.SSU_bed.count,
                                                len(self.SSU_bed.queue)])
+            
+            pats = [pat.id for pat in self.FSDEC_queue]
+            print(f'^^Time {self.env.now}, patients in FSDEC queue {pats}')
             yield self.env.timeout(self.input_params.occ_sample_time)
 
 ########################RUN#######################
@@ -565,7 +546,8 @@ def export_results(run_days, pat_results, occ_results):
     ####################Occupancy Table
     occupancy_df = pd.DataFrame(occ_results,
                                 columns=['Run', 'FSDEC Time', 'FSDEC Occupancy',
-                                'FSDEC Bed Queue', 'SSU Time', 'SSU Occupancy',
+                                'FSDEC Bed Queue', #'FSDEC Bed Queue 2', 
+                                'SSU Time', 'SSU Occupancy',
                                 'SSU Bed Queue'])
     occupancy_df['day'] = pd.cut(occupancy_df['FSDEC Time'], bins=run_days,
                                  labels=np.linspace(1, run_days, run_days))
