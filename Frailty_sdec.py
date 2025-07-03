@@ -8,23 +8,28 @@ import matplotlib.pyplot as plt
 import re
 
 class default_params():
-    run_name = 'Frailty Model'
+    run_name = 'Frailty Model v2'
+    #Set to true to print things for debugging.
+    printouts = False
     #run times and iterations
-    run_time = 525600#10080
+    run_time = 525600
     run_days = int(run_time/(60*24))
     iterations = 10
     occ_sample_time = 60
-    #FSDEC Opening Hours (to change closure days and hours, edit close FSDEC
-    #function)
+    #FSDEC Opening Hours and days (to change closure days and hours, edit close
+    # FSDEC function)
+    FSDEC_weekend_close = False
     FSDEC_open_time = 8
     FSDEC_stop_accept = 18
     FSDEC_close_time = 20
-    FSDEC_day_of_week = [0, 1, 2, 3, 4]
+    FSDEC_day_of_week = ([0, 1, 2, 3, 4] if FSDEC_weekend_close
+                         else [0, 1, 2, 3, 4, 5, 6])
     FSDEC_accept_mins = (FSDEC_stop_accept - FSDEC_open_time)*60
-    #inter arrival time (based on arrivals per day)
-    realtime_engine = create_engine('mssql+pyodbc://@dwrealtime/RealTimeReporting?'\
-                           'trusted_connection=yes&driver=ODBC+Driver+17'\
-                               '+for+SQL+Server')
+    #inter arrival time (based on actual data - uncomment code in generators
+    #to put this back in)
+    # realtime_engine = create_engine('mssql+pyodbc://@dwrealtime/RealTimeReporting?'\
+    #                     'trusted_connection=yes&driver=ODBC+Driver+17'\
+    #                         '+for+SQL+Server')
     FSDEC_arrivals_SQL = """SET NOCOUNT ON
     declare @startdatetime as datetime
     set @startdatetime = '01-oct-2024 00:00:00'
@@ -83,52 +88,58 @@ class default_params():
     from #afu_spells afu
     left join realtimereporting.Reference.[Date] dte
     on dte.[Date] = afu.EDDischargeDateTime """
-    FSDEC_arrivals = pd.read_sql(FSDEC_arrivals_SQL, realtime_engine)
-    FSDEC_arrivals['ArrivalDtm'] = (FSDEC_arrivals['EDClinicallyReadyToProceedDttm']
-                                     .fillna(FSDEC_arrivals['WardStayStart']))
-    FSDEC_arrivals = FSDEC_arrivals.sort_values(by='ArrivalDtm')
-    FSDEC_arrivals['DoW'] = FSDEC_arrivals['ArrivalDtm'].dt.dayofweek
-    FSDEC_arrivals['HoD'] = FSDEC_arrivals['ArrivalDtm'].dt.hour
-    #All days and hours
-    days = []
-    hours = []
-    for day in list(range(0, 7)):
-        for hour in list(range(0, 24)):
-            days.append(day)
-            hours.append(hour)
-    all_times = pd.DataFrame({'DoW':days, 'HoD':hours})
-    #Get ED to FSDEC Inter Arrivals
-    ED_to_FSDEC_arrivals = FSDEC_arrivals.loc[~FSDEC_arrivals['EDDischargeDateTime'].isna()].copy()
-    ED_to_FSDEC_arrivals['InterArr'] = (ED_to_FSDEC_arrivals['ArrivalDtm'].diff()
-                                        / pd.Timedelta(minutes=1)).shift(-1)
-    ED_to_FSDEC_arrivals = (all_times.merge(ED_to_FSDEC_arrivals
-                                     .groupby(['DoW', 'HoD'], as_index=False)
-                                     ['InterArr'].mean().round(),
-                                     on=['DoW', 'HoD'], how='left')
-                                     .interpolate(limit_direction='both')
-                                     .astype(int))
+    # FSDEC_arrivals = pd.read_sql(FSDEC_arrivals_SQL, realtime_engine)
+    # FSDEC_arrivals['ArrivalDtm'] = (FSDEC_arrivals['EDClinicallyReadyToProceedDttm']
+    #                                 .fillna(FSDEC_arrivals['WardStayStart']))
+    # FSDEC_arrivals = FSDEC_arrivals.sort_values(by='ArrivalDtm')
+    # FSDEC_arrivals['DoW'] = FSDEC_arrivals['ArrivalDtm'].dt.dayofweek
+    # FSDEC_arrivals['HoD'] = FSDEC_arrivals['ArrivalDtm'].dt.hour
+    # #All days and hours
+    # days = []
+    # hours = []
+    # for day in list(range(0, 7)):
+    #     for hour in list(range(0, 24)):
+    #         days.append(day)
+    #         hours.append(hour)
+    # all_times = pd.DataFrame({'DoW':days, 'HoD':hours})
+    # #Get ED to FSDEC Inter Arrivals
+    # ED_to_FSDEC_arrivals = FSDEC_arrivals.loc[~FSDEC_arrivals['EDDischargeDateTime'].isna()].copy()
+    # ED_to_FSDEC_arrivals['InterArr'] = (ED_to_FSDEC_arrivals['ArrivalDtm'].diff()
+    #                                     / pd.Timedelta(minutes=1)).shift(-1)
+    # ED_to_FSDEC_arrivals = (all_times.merge(ED_to_FSDEC_arrivals
+    #                                 .groupby(['DoW', 'HoD'], as_index=False)
+    #                                 ['InterArr'].mean().round(),
+    #                                 on=['DoW', 'HoD'], how='left')
+    #                                 .interpolate(limit_direction='both')
+    #                                 .astype(int))
 
-    #Get GP/other to FSDEC Arrivals
-    GP_to_FSDEC_arrivals = FSDEC_arrivals.loc[FSDEC_arrivals['EDDischargeDateTime'].isna()].copy()
-    GP_to_FSDEC_arrivals['InterArr'] = (GP_to_FSDEC_arrivals['ArrivalDtm'].diff()
-                                        / pd.Timedelta(minutes=1)).shift(-1)
-    GP_to_FSDEC_arrivals = (all_times.merge(GP_to_FSDEC_arrivals
-                                     .groupby(['DoW', 'HoD'], as_index=False)
-                                     ['InterArr'].mean().round(),
-                                     on=['DoW', 'HoD'], how='left')
-                                     .interpolate(limit_direction='both')
-                                     .astype(int))
-    #ED to SSU arrivals
-    mean_ED_to_SSU = 420 #Need this number
+    # #Get GP/other to FSDEC Arrivals
+    # GP_to_FSDEC_arrivals = FSDEC_arrivals.loc[FSDEC_arrivals['EDDischargeDateTime'].isna()].copy()
+    # GP_to_FSDEC_arrivals['InterArr'] = (GP_to_FSDEC_arrivals['ArrivalDtm'].diff()
+    #                                     / pd.Timedelta(minutes=1)).shift(-1)
+    # GP_to_FSDEC_arrivals = (all_times.merge(GP_to_FSDEC_arrivals
+    #                                 .groupby(['DoW', 'HoD'], as_index=False)
+    #                                 ['InterArr'].mean().round(),
+    #                                 on=['DoW', 'HoD'], how='left')
+    #                                 .interpolate(limit_direction='both')
+    #                                 .astype(int))
+
+    #Inter arrival times based on rough number
+    ED_to_FSDEC_daily_arrivals = 11
+    GP_to_FSDEC_daily_arrivals = 4
+    ED_to_SSU_daily_arrivals = 2.5
+    mean_ED_to_FSDEC = (24*60) / ED_to_FSDEC_daily_arrivals
+    mean_GP_to_FSDEC = (24*60) / GP_to_FSDEC_daily_arrivals
+    mean_ED_to_SSU = (24*60) / ED_to_SSU_daily_arrivals
     #Length of Stay
-    mean_FSDEC_los = 10*60
-    max_FSDEC_los = 12*60 #only open 12 hours, longer than this is not possible.
+    mean_FSDEC_los = 8 * 60
+    max_FSDEC_los = 12 * 60 #only open 12 hours, longer than this is not possible.
     min_FSDEC_los = 60
-    mean_SSU_los = 36*60
-    max_SSU_los = 72*60
+    mean_SSU_los = 36 * 60
+    max_SSU_los = 72 * 60
     #resources
     no_FSDEC_beds = 10
-    no_SSU_beds = 20
+    no_SSU_beds = 15
     #Probability splits
     FSDEC_to_SSU = 0.08
     FSDEC_close_to_SSU = 0.5
@@ -186,7 +197,7 @@ class frailty_model:
 
     ######################MODEL TIME AND FSDEC OPEN#############################
     def model_time(self, time):
-        #Work out what time it is and if FSDEC is closed or not.
+        #Work out what day and time it is in the model.
         day = math.floor(time / (24*60))
         day_of_week = day % 7
         #If day 0, hour is time / 60, otherwise it is the remainder time once
@@ -236,12 +247,12 @@ class frailty_model:
             self.env.process(self.frailty_journey(p))
             #randomly sample the time until the next patient arrival based on
             #current time
-            day, day_of_week, hour = self.model_time(self.env.now)
-            inter_time = self.input_params.ED_to_FSDEC_arrivals.loc[
-                  (self.input_params.ED_to_FSDEC_arrivals['DoW'] == day_of_week)
-                & (self.input_params.ED_to_FSDEC_arrivals['HoD'] == hour),
-                  'InterArr'].iloc[0]
-            sampled_interarrival = round(random.expovariate(1.0 / inter_time))
+            # day, day_of_week, hour = self.model_time(self.env.now)
+            # inter_time = self.input_params.ED_to_FSDEC_arrivals.loc[
+            #       (self.input_params.ED_to_FSDEC_arrivals['DoW'] == day_of_week)
+            #     & (self.input_params.ED_to_FSDEC_arrivals['HoD'] == hour),
+            #       'InterArr'].iloc[0]
+            sampled_interarrival = round(random.expovariate(1.0 / self.input_params.mean_ED_to_FSDEC))
             yield self.env.timeout(sampled_interarrival)
     
     def GP_to_FSDEC_arrivals(self):
@@ -258,12 +269,12 @@ class frailty_model:
             self.env.process(self.frailty_journey(p))
             #randomly sample the time until the next patient arrival based on
             #current time
-            day, day_of_week, hour = self.model_time(self.env.now)
-            inter_time = self.input_params.GP_to_FSDEC_arrivals.loc[
-                  (self.input_params.GP_to_FSDEC_arrivals['DoW'] == day_of_week)
-                & (self.input_params.GP_to_FSDEC_arrivals['HoD'] == hour),
-                  'InterArr'].iloc[0]
-            sampled_interarrival = round(random.expovariate(1.0 / inter_time))
+            # day, day_of_week, hour = self.model_time(self.env.now)
+            # inter_time = self.input_params.GP_to_FSDEC_arrivals.loc[
+            #       (self.input_params.GP_to_FSDEC_arrivals['DoW'] == day_of_week)
+            #     & (self.input_params.GP_to_FSDEC_arrivals['HoD'] == hour),
+            #       'InterArr'].iloc[0]
+            sampled_interarrival = round(random.expovariate(1.0 / self.input_params.mean_GP_to_FSDEC))
             yield self.env.timeout(sampled_interarrival)
 
     ######################### CLOSE FSDEC ################################
@@ -273,53 +284,69 @@ class frailty_model:
             if not self.FSDEC_accepting_event.triggered:
                 self.FSDEC_accepting_event.succeed()
         else:
-        # If it's already triggered, and we are now closing FSDEC, replace with a new untriggered event
+        # If FSDEC_accepting is triggered, and we are now closing FSDEC,
+        # replace with a new untriggered event
             if self.FSDEC_accepting_event.triggered:
                 self.FSDEC_accepting_event = self.env.event()
 
     def close_FSDEC(self):
         #Manage FSDEC opening and closing schedule
         while True:
+            #Get current model time
             current_time = self.env.now
             day, day_of_week, hour = self.model_time(current_time)
             
             # Check current status
-            should_be_accepting, should_be_open = self.FSDEC_open(day, day_of_week, hour)
+            should_be_accepting, should_be_open = self.FSDEC_open(
+                                                       day, day_of_week, hour)
             
+            #Open FSDEC
             if should_be_accepting and not self.FSDEC_accepting:
                 # Time to open FSDEC and start accepting patients
-                print(f'!!!!!FSDEC START ACCEPTING AT {current_time}!!!!!')
+                if self.input_params.printouts:
+                    print(f'!!!!!FSDEC START ACCEPTING AT {current_time}!!!!!')
                 self.FSDEC_accepting = True
                 self.FSDEC_is_open = True
                 self.create_FSDEC_accepting_event()
-                
+            
+            #Stop accepting to FSDEC
             elif not should_be_accepting and self.FSDEC_accepting:
                 # Time to stop accepting new patients (6pm)
-                print(f'!!!!!FSDEC STOP ACCEPTING AT {current_time}!!!!!')
+                if self.input_params.printouts:
+                    print(f'!!!!!FSDEC STOP ACCEPTING AT {current_time}!!!!!')
                 self.FSDEC_accepting = False
                 self.create_FSDEC_accepting_event()  # Create new event but don't trigger
-                
+            
+            #Close FSDEC
             elif not should_be_open and self.FSDEC_is_open:
                 # Time to close completely (8pm) - claim all beds
-                print(f'!!!!!FSDEC CLOSING AT {current_time}!!!!!')
+                if self.input_params.printouts:
+                    print(f'!!!!!FSDEC CLOSING AT {current_time}!!!!!')
                 self.FSDEC_is_open = False
                 self.FSDEC_accepting = False
                 
-                # Calculate how long to stay closed
-                if day_of_week < 4:  # Monday-Thursday, reopen next morning
+                #If FSDEC closes for the weekend, use this logic
+                if self.input_params. FSDEC_weekend_close:
+                    # Calculate how long to stay closed
+                    if day_of_week < 4:  # Monday-Thursday, reopen next morning
+                        close_duration = (24 - self.input_params.FSDEC_close_time + 
+                                        self.input_params.FSDEC_open_time) * 60
+                    else:  # Friday, closed for weekend
+                        close_duration = (72 - self.input_params.FSDEC_close_time + 
+                                        self.input_params.FSDEC_open_time) * 60
+                else: #close until next day
                     close_duration = (24 - self.input_params.FSDEC_close_time + 
-                                    self.input_params.FSDEC_open_time) * 60
-                else:  # Friday, closed for weekend
-                    close_duration = (72 - self.input_params.FSDEC_close_time + 
-                                    self.input_params.FSDEC_open_time) * 60
+                                        self.input_params.FSDEC_open_time) * 60
                 
                 #time out until next open
-                print(f'!!!!!FSDEC CLOSED!!!!!')
+                if self.input_params.printouts:
+                    print(f'!!!!!FSDEC CLOSED!!!!!')
                 yield self.env.timeout(close_duration) 
 
                 #FSDEC Re-opening
-                print(f'!!!!!FSDEC REOPENING AT {self.env.now}!!!!!')
-                print(f'!!Time: {self.env.now}, Queue length: {len(self.FSDEC_bed.queue)}, shop occupancy: {self.FSDEC_bed.count}')
+                if self.input_params.printouts:
+                    print(f'!!!!!FSDEC REOPENING AT {self.env.now}!!!!!')
+                    print(f'!!Time: {self.env.now}, Queue length: {len(self.FSDEC_bed.queue)}, shop occupancy: {self.FSDEC_bed.count}')
                 self.FSDEC_is_open = True
                 self.FSDEC_accepting = True
                 self.create_FSDEC_accepting_event()
@@ -333,10 +360,10 @@ class frailty_model:
     def frailty_journey(self, patient):
         #Enter FSDEC if patient is GP arrival or ED to FSDEC
         if (patient.arrival == 'GP arrival') or (patient.arrival == 'ED to FSDEC arrival'):
+            #Record step in patient journey and they time they did it
             patient.journey_string += 'FSDEC > '
             time = self.env.now
             patient.FSDEC_wait_start_time = time
-            day, day_of_week, hour = self.model_time(patient.FSDEC_wait_start_time)
 
             #Add patient to manual queue
             self.FSDEC_queue.append(patient)
@@ -344,10 +371,12 @@ class frailty_model:
             # Keep trying to get a bed until successful
             bed_secured = False
             req = None
-
             while not bed_secured:
+                #If FSDEC is not accepting, patient waits until accepting 
+                #event is triggered.
                 if not self.FSDEC_accepting:
-                    print(f'**patient {patient.id} waiting for FSDEC to start accepting at {self.env.now}')
+                    if self.input_params.printouts:
+                        print(f'**patient {patient.id} waiting for FSDEC to start accepting at {self.env.now}')
                     yield self.FSDEC_accepting_event
 
                 # FSDEC is now accepting, make a bed request
@@ -355,6 +384,7 @@ class frailty_model:
                 time = self.env.now
                 day, day_of_week, hour = self.model_time(time)
 
+                #Work out the time until FSDEC stops accepting for the day
                 next_stop_accept_day = (day + 1 if hour 
                                         >= self.input_params.FSDEC_stop_accept
                                         else day)
@@ -363,28 +393,36 @@ class frailty_model:
                                         * 60))
                 time_to_stop_accept = max((next_stop_accept - time), 1)
 
-                print(f'??patient {patient.id} has requested bed at {time}, {time_to_stop_accept} until FSDEC stops accepting at {time + time_to_stop_accept}')
+                if self.input_params.printouts:
+                    print(f'??patient {patient.id} has requested bed at {time}, {time_to_stop_accept} until FSDEC stops accepting at {time + time_to_stop_accept}')
 
                 #Patient either gets bed or timesout if past stop accept time
                 bed_or_timeout = yield req | self.env.timeout(time_to_stop_accept)
 
+                #If patientn got the bed before FSDEC stops accepting, they
+                #leave the while loop and continue their journey
                 if req in bed_or_timeout:
                     bed_secured = True
-                    print(f'++patient {patient.id} got FSDEC bed at {self.env.now}, req status: {req.triggered}')
+                    if self.input_params.printouts:
+                        print(f'++patient {patient.id} got FSDEC bed at {self.env.now}, req status: {req.triggered}')
+                #If FSDEC stops accepting before patient gets a bed, cancel
+                #the request and try again
                 else:
                     # Timed out, cancel request and wait for next opening
-                    print(f'**patient {patient.id} timed out waiting for bed at {self.env.now}, trying again')
+                    if self.input_params.printouts:
+                        print(f'**patient {patient.id} timed out waiting for bed at {self.env.now}, trying again')
                     if not req.triggered:
                         req.cancel()
 
-            #remove from manual queue
+            #remove from manual queue as patient has a bed
             self.FSDEC_queue.remove(patient)
             #Record time
             patient.FSDEC_admitted_time = self.env.now
             day, day_of_week, hour = self.model_time(patient.FSDEC_admitted_time)
-            #Get sampled FSDEC time, resample if over maximum
+            #Get sampled FSDEC time
             sampled_FSDEC_time = round(random.expovariate(1.0
                                         / self.input_params.mean_FSDEC_los))
+            #resample if not between max and min values
             while ((sampled_FSDEC_time < self.input_params.min_FSDEC_los)
                 or (sampled_FSDEC_time > self.input_params.max_FSDEC_los)):
                 sampled_FSDEC_time = round(random.expovariate(1.0
@@ -405,11 +443,12 @@ class frailty_model:
                 patient.SSU_priority = -1
             yield self.env.timeout(sampled_FSDEC_time)
 
-            # Release the bed
+            # Release the bed and record patient leave time
             self.FSDEC_bed.release(req)
-            print(f'--patient {patient.id} leaving FSDEC bed at {self.env.now}')
-
+            if self.input_params.printouts:
+                print(f'--patient {patient.id} leaving FSDEC bed at {self.env.now}')
             patient.FSDEC_leave_time = self.env.now
+
             #If patient does not continue on to SSU, then this is their final step
             if not patient.FSDEC_to_SSU:
                 patient.journey_string += 'Out'
@@ -460,14 +499,14 @@ class frailty_model:
                                                self.FSDEC_bed._env.now - 1,
                                                (self.FSDEC_bed.count
                                                     if FSDEC_open else np.nan),
-                                               #len(self.FSDEC_bed.queue),
                                                len(self.FSDEC_queue),
                                                self.SSU_bed._env.now - 1,
                                                self.SSU_bed.count,
                                                len(self.SSU_bed.queue)])
             
             pats = [pat.id for pat in self.FSDEC_queue]
-            print(f'^^Time {self.env.now}, patients in FSDEC queue {pats}')
+            if self.input_params.printouts:
+                print(f'^^Time {self.env.now}, patients in FSDEC queue {pats}')
             yield self.env.timeout(self.input_params.occ_sample_time)
 
 ########################RUN#######################
@@ -482,6 +521,11 @@ class frailty_model:
         default_params.occ_res += self.mru_occupancy_results
         return self.patient_results, self.mru_occupancy_results
 
+def time_to_day_and_hour(col):
+    day = col  // (24*60)
+    hour = ((col / 60) % 24).apply(np.floor)
+    return pd.DataFrame({'Day':day, 'Hour': hour})
+
 def export_results(run_days, pat_results, occ_results):
     ####################Patient Table
     patient_df = pd.DataFrame(pat_results,
@@ -493,55 +537,76 @@ def export_results(run_days, pat_results, occ_results):
     #####Arrivals
     patient_df['Simulation Arrival Time'] = (patient_df['FSDEC Wait Start Time']
                                     .fillna(patient_df['SSU Wait Start Time']))
-    patient_df['Simulation Arrival Day'] = pd.cut(
-                           patient_df['Simulation Arrival Time'], bins=run_days,
-                           labels=np.linspace(1, run_days, run_days))
-    patient_df['Simulation Arrival Hour'] =(
-                                        (patient_df['Simulation Arrival Time']
-                                         / 60) % 24).apply(np.floor)
+    patient_df[['Simulation Arrival Day',
+                'Simulation Arrival Hour']] = time_to_day_and_hour(
+                                              patient_df['Simulation Arrival Time'])
+
+    # patient_df['Simulation Arrival Day'] = pd.cut(
+    #                        patient_df['Simulation Arrival Time'], bins=run_days,
+    #                        labels=np.linspace(1, run_days, run_days))
+    # patient_df['Simulation Arrival Hour'] = min_to_day_and_hour(pat['Simulation Arrival Time'])[1]
     #####FSDEC
     patient_df['Wait for FSDEC Bed Time'] = (patient_df['FSDEC Arrival Time']
                                         - patient_df['FSDEC Wait Start Time'])
-    patient_df['FSDEC Arrival Hour'] = (
-                                   (patient_df['FSDEC Arrival Time'] / 60) % 24
-                                   ).apply(np.floor)
-    patient_df['FSDEC Arrival Day'] = (patient_df['FSDEC Arrival Time']
-    // (24*60))
+    patient_df[['FSDEC Arrival Day',
+                'FSDEC Arrival Hour']] = time_to_day_and_hour(
+                                         patient_df['FSDEC Arrival Time'])
+    # patient_df['FSDEC Arrival Hour'] = (
+    #                                (patient_df['FSDEC Arrival Time'] / 60) % 24
+    #                                ).apply(np.floor)
+    # patient_df['FSDEC Arrival Day'] = (patient_df['FSDEC Arrival Time'] // (24*60))
     #Have SSU entry time in case they queue to get in there.
     patient_df['FSDEC Actual Leave Time'] = np.where(patient_df['Journey']
                                                     .str.contains('FSDEC > SSU')
                                         | patient_df['Journey']
                                          .str.contains('FSDEC > KICKOUT > SSU'),
                                         patient_df['SSU Arrival Time'],
-                                        patient_df['FSDEC Leave Time']) 
-    patient_df['FSDEC Leave Hour'] = ((patient_df['FSDEC Actual Leave Time']
-                                       / 60) % 24).apply(np.floor)
-    patient_df['FSDEC Leave Day'] = (patient_df['FSDEC Actual Leave Time']
-                                    // (24*60))
+                                        patient_df['FSDEC Leave Time'])
+    patient_df[['FSDEC Leave Day',
+                'FSDEC Leave Hour']] = time_to_day_and_hour(
+                                         patient_df['FSDEC Actual Leave Time'])
+    
+    # patient_df['FSDEC Leave Hour'] = ((patient_df['FSDEC Actual Leave Time']
+    #                                    / 60) % 24).apply(np.floor)
+    # patient_df['FSDEC Leave Day'] = (patient_df['FSDEC Actual Leave Time']
+    #                                 // (24*60))
     patient_df['FSDEC LoS'] = (patient_df['FSDEC Actual Leave Time']
                                - patient_df['FSDEC Arrival Time'])
     #####SSU
     patient_df['Wait for SSU Bed Time'] = (patient_df['SSU Arrival Time']
                                            - patient_df['SSU Wait Start Time'])
-    patient_df['SSU Arrival Hour'] = (
-                                     (patient_df['SSU Arrival Time'] / 60) % 24
-                                     ).apply(np.floor)
-    patient_df['SSU Arrival Day'] = patient_df['SSU Arrival Time'] // (24*60)
+    # patient_df['SSU Arrival Hour'] = (
+    #                                  (patient_df['SSU Arrival Time'] / 60) % 24
+    #                                  ).apply(np.floor)
+    # patient_df['SSU Arrival Day'] = patient_df['SSU Arrival Time'] // (24*60)
+
+    patient_df[['SSU Arrival Day',
+                'SSU Arrival Hour']] = time_to_day_and_hour(
+                                       patient_df['SSU Arrival Time'])
+    patient_df[['SSU Leave Day',
+                'SSU Leave Hour']] = time_to_day_and_hour(
+                                       patient_df['SSU Leave Time'])
+    
     patient_df['SSU LoS'] = (patient_df['SSU Leave Time']
                              - patient_df['SSU Arrival Time'])
-    patient_df['SSU Leave Hour'] = ((patient_df['SSU Leave Time']
-                                       / 60) % 24).apply(np.floor)
-    patient_df['SSU Leave Day'] = (patient_df['SSU Leave Time']
-                                    // (24*60))
+    # patient_df['SSU Leave Hour'] = ((patient_df['SSU Leave Time']
+    #                                    / 60) % 24).apply(np.floor)
+    # patient_df['SSU Leave Day'] = (patient_df['SSU Leave Time']
+    #                                 // (24*60))
+    
     #####Leaving
     patient_df['Simulation Leave Time'] = (patient_df['SSU Leave Time']
                                         .fillna(patient_df['FSDEC Leave Time']))
-    patient_df['Simulation Leave Day'] = pd.cut(
-                                      patient_df['Simulation Leave Time'],
-                                      bins=run_days,
-                                      labels=np.linspace(1, run_days, run_days))
-    patient_df['Simulation Leave Hour'] = (patient_df['Simulation Leave Time']
-                                           / 60).round().astype(int)
+    patient_df[['Simulation Leave Day',
+                'Simulation Leave Hour']] = time_to_day_and_hour(
+                                       patient_df['Simulation Leave Time'])
+    
+    # patient_df['Simulation Leave Day'] = pd.cut(
+    #                                   patient_df['Simulation Leave Time'],
+    #                                   bins=run_days,
+    #                                   labels=np.linspace(1, run_days, run_days))
+    # patient_df['Simulation Leave Hour'] = (patient_df['Simulation Leave Time']
+    #                                        / 60).round().astype(int)
 
     ####################Occupancy Table
     occupancy_df = pd.DataFrame(occ_results,
@@ -549,11 +614,12 @@ def export_results(run_days, pat_results, occ_results):
                                 'FSDEC Bed Queue', #'FSDEC Bed Queue 2', 
                                 'SSU Time', 'SSU Occupancy',
                                 'SSU Bed Queue'])
-    occupancy_df['day'] = pd.cut(occupancy_df['FSDEC Time'], bins=run_days,
-                                 labels=np.linspace(1, run_days, run_days))
-    occupancy_df['hour'] = (occupancy_df['FSDEC Time'] / 60) % 24
-    #Remove occupancy when closed, and fill in queue between 6-8pm
     
+    occupancy_df[['day', 'hour']] = time_to_day_and_hour(
+                                    occupancy_df['FSDEC Time'])
+    # occupancy_df['day'] = pd.cut(occupancy_df['FSDEC Time'], bins=run_days,
+    #                              labels=np.linspace(1, run_days, run_days))
+    # occupancy_df['hour'] = (occupancy_df['FSDEC Time'] / 60) % 24
 
     return patient_df, occupancy_df
 
@@ -920,3 +986,5 @@ fig.tight_layout()
 plt.savefig(f'C:/Users/obriene/Projects/Discrete Event Simulation/Frailty SDEC/Results/{default_params.run_name} - Bed Queue DoW.png',
             bbox_inches='tight', dpi=1200)
 plt.close()
+
+x=5
