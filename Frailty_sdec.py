@@ -541,20 +541,12 @@ def export_results(run_days, pat_results, occ_results):
                 'Simulation Arrival Hour']] = time_to_day_and_hour(
                                               patient_df['Simulation Arrival Time'])
 
-    # patient_df['Simulation Arrival Day'] = pd.cut(
-    #                        patient_df['Simulation Arrival Time'], bins=run_days,
-    #                        labels=np.linspace(1, run_days, run_days))
-    # patient_df['Simulation Arrival Hour'] = min_to_day_and_hour(pat['Simulation Arrival Time'])[1]
     #####FSDEC
     patient_df['Wait for FSDEC Bed Time'] = (patient_df['FSDEC Arrival Time']
                                         - patient_df['FSDEC Wait Start Time'])
     patient_df[['FSDEC Arrival Day',
                 'FSDEC Arrival Hour']] = time_to_day_and_hour(
                                          patient_df['FSDEC Arrival Time'])
-    # patient_df['FSDEC Arrival Hour'] = (
-    #                                (patient_df['FSDEC Arrival Time'] / 60) % 24
-    #                                ).apply(np.floor)
-    # patient_df['FSDEC Arrival Day'] = (patient_df['FSDEC Arrival Time'] // (24*60))
     #Have SSU entry time in case they queue to get in there.
     patient_df['FSDEC Actual Leave Time'] = np.where(patient_df['Journey']
                                                     .str.contains('FSDEC > SSU')
@@ -565,34 +557,19 @@ def export_results(run_days, pat_results, occ_results):
     patient_df[['FSDEC Leave Day',
                 'FSDEC Leave Hour']] = time_to_day_and_hour(
                                          patient_df['FSDEC Actual Leave Time'])
-    
-    # patient_df['FSDEC Leave Hour'] = ((patient_df['FSDEC Actual Leave Time']
-    #                                    / 60) % 24).apply(np.floor)
-    # patient_df['FSDEC Leave Day'] = (patient_df['FSDEC Actual Leave Time']
-    #                                 // (24*60))
     patient_df['FSDEC LoS'] = (patient_df['FSDEC Actual Leave Time']
                                - patient_df['FSDEC Arrival Time'])
     #####SSU
     patient_df['Wait for SSU Bed Time'] = (patient_df['SSU Arrival Time']
                                            - patient_df['SSU Wait Start Time'])
-    # patient_df['SSU Arrival Hour'] = (
-    #                                  (patient_df['SSU Arrival Time'] / 60) % 24
-    #                                  ).apply(np.floor)
-    # patient_df['SSU Arrival Day'] = patient_df['SSU Arrival Time'] // (24*60)
-
     patient_df[['SSU Arrival Day',
                 'SSU Arrival Hour']] = time_to_day_and_hour(
                                        patient_df['SSU Arrival Time'])
     patient_df[['SSU Leave Day',
                 'SSU Leave Hour']] = time_to_day_and_hour(
                                        patient_df['SSU Leave Time'])
-    
     patient_df['SSU LoS'] = (patient_df['SSU Leave Time']
                              - patient_df['SSU Arrival Time'])
-    # patient_df['SSU Leave Hour'] = ((patient_df['SSU Leave Time']
-    #                                    / 60) % 24).apply(np.floor)
-    # patient_df['SSU Leave Day'] = (patient_df['SSU Leave Time']
-    #                                 // (24*60))
     
     #####Leaving
     patient_df['Simulation Leave Time'] = (patient_df['SSU Leave Time']
@@ -600,13 +577,6 @@ def export_results(run_days, pat_results, occ_results):
     patient_df[['Simulation Leave Day',
                 'Simulation Leave Hour']] = time_to_day_and_hour(
                                        patient_df['Simulation Leave Time'])
-    
-    # patient_df['Simulation Leave Day'] = pd.cut(
-    #                                   patient_df['Simulation Leave Time'],
-    #                                   bins=run_days,
-    #                                   labels=np.linspace(1, run_days, run_days))
-    # patient_df['Simulation Leave Hour'] = (patient_df['Simulation Leave Time']
-    #                                        / 60).round().astype(int)
 
     ####################Occupancy Table
     occupancy_df = pd.DataFrame(occ_results,
@@ -617,9 +587,6 @@ def export_results(run_days, pat_results, occ_results):
     
     occupancy_df[['day', 'hour']] = time_to_day_and_hour(
                                     occupancy_df['FSDEC Time'])
-    # occupancy_df['day'] = pd.cut(occupancy_df['FSDEC Time'], bins=run_days,
-    #                              labels=np.linspace(1, run_days, run_days))
-    # occupancy_df['hour'] = (occupancy_df['FSDEC Time'] / 60) % 24
 
     return patient_df, occupancy_df
 
