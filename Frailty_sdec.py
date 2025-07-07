@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 import re
 
 class default_params():
-    run_name = 'Frailty Model v2'
+    run_name = 'Frailty Model v3 - 10 FSDEC Beds, 7 Days Open'
     #Set to true to print things for debugging.
     printouts = False
     #run times and iterations
@@ -20,7 +20,7 @@ class default_params():
     # FSDEC function)
     FSDEC_weekend_close = False
     FSDEC_open_time = 8
-    FSDEC_stop_accept = 18
+    FSDEC_stop_accept = 16#18
     FSDEC_close_time = 20
     FSDEC_day_of_week = ([0, 1, 2, 3, 4] if FSDEC_weekend_close
                          else [0, 1, 2, 3, 4, 5, 6])
@@ -134,9 +134,10 @@ class default_params():
     #Length of Stay
     mean_FSDEC_los = 8 * 60
     max_FSDEC_los = 12 * 60 #only open 12 hours, longer than this is not possible.
-    min_FSDEC_los = 60
+    min_FSDEC_los = 4 * 60
     mean_SSU_los = 36 * 60
     max_SSU_los = 72 * 60
+    min_SSU_los = 14 * 60
     #resources
     no_FSDEC_beds = 10
     no_SSU_beds = 15
@@ -326,7 +327,7 @@ class frailty_model:
                 self.FSDEC_accepting = False
                 
                 #If FSDEC closes for the weekend, use this logic
-                if self.input_params. FSDEC_weekend_close:
+                if self.input_params.FSDEC_weekend_close:
                     # Calculate how long to stay closed
                     if day_of_week < 4:  # Monday-Thursday, reopen next morning
                         close_duration = (24 - self.input_params.FSDEC_close_time + 
@@ -463,12 +464,18 @@ class frailty_model:
             with self.SSU_bed.request(priority = patient.SSU_priority) as req:
                 yield req
                 patient.SSU_admitted_time = self.env.now
+                    
+                #Get sampled SSU time
                 sampled_SSU_time = round(random.expovariate(1.0
                                             / self.input_params.mean_SSU_los))
-                #Resample SSU time until less thamn the max.
-                while sampled_SSU_time > self.input_params.max_SSU_los:
+                #resample if not between max and min values
+                while ((sampled_SSU_time < self.input_params.min_SSU_los)
+                    or (sampled_SSU_time > self.input_params.max_SSU_los)):
                     sampled_SSU_time = round(random.expovariate(1.0
                                             / self.input_params.mean_SSU_los))
+                patient.SSU_sampled_time = sampled_SSU_time
+
+
                 yield self.env.timeout(sampled_SSU_time)
             patient.SSU_leave_time = self.env.now
             #Patient leaves the model.
@@ -607,6 +614,25 @@ pat, occ = run_the_model(default_params)
 pat.to_csv(f'C:/Users/obriene/Projects/Discrete Event Simulation/Frailty SDEC/Results/Full Results/patients - {default_params.run_name}.csv')
 occ.to_csv(f'C:/Users/obriene/Projects/Discrete Event Simulation/Frailty SDEC/Results/Full Results/occupancy - {default_params.run_name}.csv')
 
+#Summry table
+#Throughput
+FSDEC_av_throughput = pat.groupby(['FSDEC Leave Day', 'Run'])['Patient ID'].count().mean()
+SSU_av_throughput = pat.groupby(['SSU Leave Day', 'Run'])['Patient ID'].count().mean()
+#FSEC Queue
+FSDEC_av_wait = pat['Wait for FSDEC Bed Time'].mean()
+FSDEC_av_queue = occ['FSDEC Bed Queue'].mean()
+#SSU Queue
+SSU_av_wait = pat['Wait for SSU Bed Time'].mean()
+SSU_av_queue = occ['SSU Bed Queue'].mean()
+summary = pd.DataFrame({'Scenario' : [default_params.run_name],
+                        'FSDEC Mean Daily Throughput' : [FSDEC_av_throughput],
+                        'FSDEC Mean Bed Wait Time' : [FSDEC_av_wait],
+                        'FSDEC Mean Queue Length' : [FSDEC_av_queue],
+                        'SSU Mean Daily Throughput' : [FSDEC_av_throughput],
+                        'SSU Mean Bed Wait Time' : [SSU_av_wait],
+                        'SSU Mean Queue Length' : [SSU_av_queue]}).round(2)
+summary.to_csv(f'C:/Users/obriene/Projects/Discrete Event Simulation/Frailty SDEC/Results/Full Results/Summary - {default_params.run_name}.csv')
+
 #Lists of weeks days for plots
 DoW_7 = np.array([1, 2, 3, 4, 5, 6, 7]).astype(str)
 DoW_df = pd.DataFrame({'DoW':[1, 2, 3, 4, 5, 6, 7]})
@@ -694,7 +720,7 @@ plt.savefig(f'C:/Users/obriene/Projects/Discrete Event Simulation/Frailty SDEC/R
 plt.close()
 
 ######Occupancy by DoW
-occ['DoW'] = ((occ['day'].astype(int)-1) % 7) + 1
+occ['DoW'] = ((occ['day'].astype(int)) % 7) + 1
 #Metrics by day of week
 occ_metrics = (occ.groupby('DoW', observed=False,  as_index=False)
                [['FSDEC Occupancy', 'SSU Occupancy']]
